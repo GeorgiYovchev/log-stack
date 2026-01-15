@@ -1,0 +1,172 @@
+---
+- name: Deploy Log Stack Configuration (Smart Restart)
+  hosts: log_stack
+  become: true
+  vars:
+    log_stack_path: /opt/log-stack
+    
+  tasks:
+    - name: Create log-stack directory
+      file:
+        path: "{{ log_stack_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Backup current docker-compose.yml
+      copy:
+        src: "{{ log_stack_path }}/docker-compose.yml"
+        dest: "{{ log_stack_path }}/docker-compose.yml.backup"
+        remote_src: yes
+      ignore_errors: true
+
+    - name: Copy new docker-compose.yml
+      copy:
+        src: docker-compose.yml
+        dest: "{{ log_stack_path }}/docker-compose.yml.new"
+        mode: '0644'
+
+    - name: Check if Kafka config changed in docker-compose
+      shell: |
+        if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
+          echo "true"
+        else
+          diff <(grep -A 30 "kafka:" {{ log_stack_path }}/docker-compose.yml.backup | head -35) \
+               <(grep -A 30 "kafka:" {{ log_stack_path }}/docker-compose.yml.new | head -35) > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+        fi
+      args:
+        executable: /bin/bash
+      register: kafka_config_changed
+      changed_when: false
+
+    - name: Check if Loki config changed in docker-compose
+      shell: |
+        if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
+          echo "true"
+        else
+          diff <(grep -A 20 "loki:" {{ log_stack_path }}/docker-compose.yml.backup | head -25) \
+               <(grep -A 20 "loki:" {{ log_stack_path }}/docker-compose.yml.new | head -25) > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+        fi
+      args:
+        executable: /bin/bash
+      register: loki_compose_changed
+      changed_when: false
+
+    - name: Check if Grafana config changed in docker-compose
+      shell: |
+        if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
+          echo "true"
+        else
+          diff <(grep -A 20 "grafana:" {{ log_stack_path }}/docker-compose.yml.backup | head -25) \
+               <(grep -A 20 "grafana:" {{ log_stack_path }}/docker-compose.yml.new | head -25) > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+        fi
+      args:
+        executable: /bin/bash
+      register: grafana_compose_changed
+      changed_when: false
+
+    - name: Check if Fluent Bit config changed in docker-compose
+      shell: |
+        if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
+          echo "true"
+        else
+          diff <(grep -A 10 "fluent-bit:" {{ log_stack_path }}/docker-compose.yml.backup | head -15) \
+               <(grep -A 10 "fluent-bit:" {{ log_stack_path }}/docker-compose.yml.new | head -15) > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+        fi
+      args:
+        executable: /bin/bash
+      register: fluentbit_compose_changed
+      changed_when: false
+
+    - name: Move new docker-compose.yml to final location
+      command: mv {{ log_stack_path }}/docker-compose.yml.new {{ log_stack_path }}/docker-compose.yml
+      when: kafka_config_changed.stdout == "true" or 
+            loki_compose_changed.stdout == "true" or 
+            grafana_compose_changed.stdout == "true" or
+            fluentbit_compose_changed.stdout == "true"
+
+    - name: Copy fluent-bit.conf
+      copy:
+        src: fluent-bit.conf
+        dest: "{{ log_stack_path }}/fluent-bit.conf"
+        mode: '0644'
+      register: fluent_bit_result
+
+    - name: Copy loki-config.yml
+      copy:
+        src: loki-config.yml
+        dest: "{{ log_stack_path }}/loki-config.yml"
+        mode: '0644'
+      register: loki_config_result
+
+    - name: Show what will be restarted
+      debug:
+        msg:
+          - "Kafka restart: {{ 'YES' if kafka_config_changed.stdout == 'true' else 'NO' }}"
+          - "Loki restart: {{ 'YES' if (loki_compose_changed.stdout == 'true' or loki_config_result.changed) else 'NO' }}"
+          - "Grafana restart: {{ 'YES' if grafana_compose_changed.stdout == 'true' else 'NO' }}"
+          - "Fluent Bit restart: {{ 'YES' if (fluentbit_compose_changed.stdout == 'true' or fluent_bit_result.changed) else 'NO' }}"
+
+    - name: Restart Kafka (only if Kafka config changed)
+      community.docker.docker_compose_v2:
+        project_src: "{{ log_stack_path }}"
+        services:
+          - kafka
+        state: restarted
+      when: kafka_config_changed.stdout == "true"
+
+    - name: Restart Loki (if Loki docker-compose or loki-config.yml changed)
+      community.docker.docker_compose_v2:
+        project_src: "{{ log_stack_path }}"
+        services:
+          - loki
+        state: restarted
+      when: loki_compose_changed.stdout == "true" or loki_config_result.changed
+
+    - name: Restart Grafana (only if Grafana config changed)
+      community.docker.docker_compose_v2:
+        project_src: "{{ log_stack_path }}"
+        services:
+          - grafana
+        state: restarted
+      when: grafana_compose_changed.stdout == "true"
+
+    - name: Restart Fluent Bit (if Fluent Bit docker-compose or fluent-bit.conf changed)
+      community.docker.docker_compose_v2:
+        project_src: "{{ log_stack_path }}"
+        services:
+          - fluent-bit
+        state: restarted
+      when: fluentbit_compose_changed.stdout == "true" or fluent_bit_result.changed
+
+    - name: Verify all services are running
+      command: docker compose -f {{ log_stack_path }}/docker-compose.yml ps
+      register: compose_ps
+      
+    - name: Show running services
+      debug:
+        var: compose_ps.stdout_lines
+
+    - name: Cleanup backup
+      file:
+        path: "{{ log_stack_path }}/docker-compose.yml.backup"
+        state: absent

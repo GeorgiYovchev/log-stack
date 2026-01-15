@@ -1,0 +1,89 @@
+version: "3.9"
+
+services:
+  kafka:
+    image: bitnamilegacy/kafka:latest
+    container_name: kafka
+    environment:
+      - KAFKA_CLUSTER_ID=kraft-cluster
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://217.154.234.140:19092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_LOG_RETENTION_HOURS=72
+      - KAFKA_CFG_LOG_RETENTION_CHECK_INTERVAL_MS=300000
+      - KAFKA_CFG_LOG_SEGMENT_BYTES=1073741824
+      - KAFKA_CFG_COMPRESSION_TYPE=lz4
+      - KAFKA_CFG_LOG_COMPRESSION_TYPE=lz4
+    volumes:
+      - /opt/log-stack/data/kafka:/bitnami/kafka
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - /opt/log-stack/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - /opt/log-stack/data/loki:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.3.4
+    container_name: grafana
+    depends_on:
+      - loki
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - /opt/log-stack/data/grafana:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  kafka-init:
+    image: bitnamilegacy/kafka:latest
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Waiting for Kafka to be ready...'
+      sleep 20
+      kafka-topics.sh --create --if-not-exists \
+        --bootstrap-server kafka:9092 \
+        --topic logs \
+        --partitions 3 \
+        --replication-factor 1 && \
+      echo 'Topic logs created successfully' || \
+      echo 'Failed to create topic - may already exist'
+      "
+    restart: "no"
+
+  fluent-bit:
+    image: fluent/fluent-bit:4.1
+    container_name: fluent-bit
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - /opt/log-stack/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /opt/log-stack/lua:/fluent-bit/etc/lua:ro
+    restart: unless-stopped
+
+networks:
+  default:
+    name: log-stack

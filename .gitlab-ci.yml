@@ -1,0 +1,82 @@
+stages:
+  - validate
+  - deploy
+
+variables:
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+
+# Validate before deploy
+validate:configs:
+  stage: validate
+  image: python:3.11-alpine
+  script:
+    - echo "=== Validating configuration syntax ==="
+    - pip install pyyaml
+    
+    # Validate YAML files
+    - python -c "import yaml; yaml.safe_load(open('docker-compose.yml'))"
+    - echo "✅ docker-compose.yml is valid YAML"
+    
+    - python -c "import yaml; yaml.safe_load(open('loki-config.yml'))"
+    - echo "✅ loki-config.yml is valid YAML"
+    
+    # Fluent-bit.conf is INI format - basic structure check
+    - cat fluent-bit.conf | grep -E '^\[INPUT\]|^\[OUTPUT\]' > /dev/null
+    - echo "✅ fluent-bit.conf has valid structure"
+    
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - docker-compose.yml
+        - fluent-bit.conf
+        - loki-config.yml
+    - if: '$CI_COMMIT_BRANCH != "main" && $CI_COMMIT_BRANCH != "master"'
+      changes:
+        - docker-compose.yml
+        - fluent-bit.conf
+        - loki-config.yml
+
+# Production deploy after merge with main
+deploy:production:
+  stage: deploy
+  image: 
+    name: cytopia/ansible:latest
+    entrypoint: [""]
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H 217.154.234.140 >> ~/.ssh/known_hosts
+  script:
+    - cp docker-compose.yml ansible/
+    - cp fluent-bit.conf ansible/
+    - cp loki-config.yml ansible/
+
+    - cd ansible
+    - echo "=== DEPLOYING TO PRODUCTION ==="
+    - ansible-playbook -i inventory.yml playbook.yml -v
+    - echo "=== DEPLOYMENT COMPLETED ==="
+  environment:
+    name: production
+    url: http://217.154.234.140:3000
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - docker-compose.yml
+        - fluent-bit.conf
+        - loki-config.yml
+        - ansible/**/*
+        - .gitlab-ci.yml
+
+# Notification on successfull deploy
+notify:success:
+  stage: .post
+  image: curlimages/curl:latest
+  script:
+    - |
+      echo "Deployment successful!"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      when: on_success
+  allow_failure: true
