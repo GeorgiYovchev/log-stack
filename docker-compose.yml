@@ -73,6 +73,19 @@ services:
       "
     restart: "no"
 
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: kafka-exporter
+    command:
+      - '--kafka.server=kafka:19092'
+      - '--kafka.version=3.5.0'
+      - '--web.listen-address=:9308'
+    ports:
+      - "9308:9308"
+    restart: unless-stopped
+    depends_on:
+      - kafka
+
   fluent-bit:
     image: fluent/fluent-bit:4.1
     container_name: fluent-bit
