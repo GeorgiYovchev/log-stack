@@ -48,8 +48,9 @@
         if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
           echo "true"
         else
-          diff <(grep -A 20 "loki:" {{ log_stack_path }}/docker-compose.yml.backup | head -25) \
-               <(grep -A 20 "loki:" {{ log_stack_path }}/docker-compose.yml.new | head -25) > /dev/null 2>&1
+          # Extract only the loki service block (stop at next service or networks)
+          diff <(sed -n '/^  loki:/,/^  [a-z]/p' {{ log_stack_path }}/docker-compose.yml.backup | head -n -1) \
+               <(sed -n '/^  loki:/,/^  [a-z]/p' {{ log_stack_path }}/docker-compose.yml.new | head -n -1) > /dev/null 2>&1
           if [ $? -ne 0 ]; then
             echo "true"
           else
@@ -66,8 +67,9 @@
         if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
           echo "true"
         else
-          diff <(grep -A 20 "grafana:" {{ log_stack_path }}/docker-compose.yml.backup | head -25) \
-               <(grep -A 20 "grafana:" {{ log_stack_path }}/docker-compose.yml.new | head -25) > /dev/null 2>&1
+          # Extract only the grafana service block
+          diff <(sed -n '/^  grafana:/,/^  [a-z]/p' {{ log_stack_path }}/docker-compose.yml.backup | head -n -1) \
+               <(sed -n '/^  grafana:/,/^  [a-z]/p' {{ log_stack_path }}/docker-compose.yml.new | head -n -1) > /dev/null 2>&1
           if [ $? -ne 0 ]; then
             echo "true"
           else
@@ -118,45 +120,88 @@
         mode: '0644'
       register: loki_config_result
 
+    - name: Copy Lua Script for Fluent Bit
+      copy: 
+        src: set_level.lua
+        dest: "{{ log_stack_path }}/lua/set_level.lua"
+        mode: '0644'
+      register: lua_script_result
+
     - name: Show what will be restarted
       debug:
         msg:
           - "Kafka restart: {{ 'YES' if kafka_config_changed.stdout == 'true' else 'NO' }}"
           - "Loki restart: {{ 'YES' if (loki_compose_changed.stdout == 'true' or loki_config_result.changed) else 'NO' }}"
           - "Grafana restart: {{ 'YES' if grafana_compose_changed.stdout == 'true' else 'NO' }}"
-          - "Fluent Bit restart: {{ 'YES' if (fluentbit_compose_changed.stdout == 'true' or fluent_bit_result.changed) else 'NO' }}"
+          - "Fluent Bit restart: {{ 'YES' if (fluentbit_compose_changed.stdout == 'true' or fluent_bit_result.changed or lua_script_result.changed) else 'NO' }}"
 
     - name: Restart Kafka (only if Kafka config changed)
-      community.docker.docker_compose_v2:
-        project_src: "{{ log_stack_path }}"
-        services:
-          - kafka
-        state: restarted
+      block:
+        - name: Stop Kafka
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - kafka
+            state: stopped
+        
+        - name: Start Kafka
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - kafka
+            state: started
       when: kafka_config_changed.stdout == "true"
 
     - name: Restart Loki (if Loki docker-compose or loki-config.yml changed)
-      community.docker.docker_compose_v2:
-        project_src: "{{ log_stack_path }}"
-        services:
-          - loki
-        state: restarted
+      block:
+        - name: Stop Loki
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - loki
+            state: stopped
+        
+        - name: Start Loki
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - loki
+            state: started
       when: loki_compose_changed.stdout == "true" or loki_config_result.changed
 
     - name: Restart Grafana (only if Grafana config changed)
-      community.docker.docker_compose_v2:
-        project_src: "{{ log_stack_path }}"
-        services:
-          - grafana
-        state: restarted
+      block:
+        - name: Stop Grafana
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - grafana
+            state: stopped
+        
+        - name: Start Grafana
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - grafana
+            state: started
       when: grafana_compose_changed.stdout == "true"
 
-    - name: Restart Fluent Bit (if Fluent Bit docker-compose or fluent-bit.conf changed)
-      community.docker.docker_compose_v2:
-        project_src: "{{ log_stack_path }}"
-        services:
-          - fluent-bit
-        state: restarted
-      when: fluentbit_compose_changed.stdout == "true" or fluent_bit_result.changed
+    - name: Restart Fluent Bit (if Fluent Bit docker-compose or fluent-bit.conf or lua changed)
+      block:
+        - name: Stop Fluent Bit
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - fluent-bit
+            state: stopped
+        
+        - name: Start Fluent Bit
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - fluent-bit
+            state: started
+      when: fluentbit_compose_changed.stdout == "true" or fluent_bit_result.changed or lua_script_result.changed
 
     - name: Verify all services are running
       command: docker compose -f {{ log_stack_path }}/docker-compose.yml ps

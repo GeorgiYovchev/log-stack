@@ -44,9 +44,29 @@ services:
     depends_on:
       - loki
     environment:
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_LOCAL_ENABLED=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_AUTH_GITLAB_ENABLED=true
+      - GF_AUTH_GITLAB_ALLOW_SIGN_UP=true
+      - GF_AUTH_GITLAB_ALLOW_ASSIGN_GRAFANA_ADMIN=true
+      - GF_AUTH_GITLAB_ALLOWED_DOMAINS=oddstech.net
+      - GF_AUTH_GITLAB_CLIENT_ID=[CLIENT ID]
+      - GF_AUTH_GITLAB_CLIENT_SECRET=[CLIENT SECRET]
+      - GF_AUTH_GITLAB_AUTH_URL=https://gitlab.oddstech.net/oauth/authorize
+      - GF_AUTH_GITLAB_TOKEN_URL=https://gitlab.oddstech.net/oauth/token
+      - GF_AUTH_GITLAB_API_URL=https://gitlab.oddstech.net/api/v4/user
+      - GF_AUTH_GITLAB_SCOPES=openid email profile
+      - GF_AUTH_GITLAB_USE_PKCE=true
+      - GF_AUTH_GITLAB_USE_REFRESH_TOKEN=true
+      - GF_AUTH_GITLAB_ROLE_ATTRIBUTE_PATH=contains(groups[*], 'devops') && 'Admin' || 'Editor'
+      - GF_SERVER_DOMAIN=loki.oddstech.net
+      - GF_SERVER_ROOT_URL=https://loki.oddstech.net
+      - GF_LOG_MODE=console
+
     volumes:
       - /opt/log-stack/data/grafana:/var/lib/grafana
     ports:
@@ -72,19 +92,6 @@ services:
       echo 'Failed to create topic - may already exist'
       "
     restart: "no"
-
-  kafka-exporter:
-    image: danielqsj/kafka-exporter:latest
-    container_name: kafka-exporter
-    command:
-      - '--kafka.server=kafka:19092'
-      - '--kafka.version=3.5.0'
-      - '--web.listen-address=:9308'
-    ports:
-      - "9308:9308"
-    restart: unless-stopped
-    depends_on:
-      - kafka
 
   fluent-bit:
     image: fluent/fluent-bit:4.1

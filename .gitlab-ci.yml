@@ -23,6 +23,11 @@ validate:configs:
     # Fluent-bit.conf is INI format - basic structure check
     - cat fluent-bit.conf | grep -E '^\[INPUT\]|^\[OUTPUT\]' > /dev/null
     - echo "✅ fluent-bit.conf has valid structure"
+
+    # Validate LUA syntax
+    - apk add --no-cache lua5.1
+    - luac -p lua/set_level.lua
+    - echo "✅ lua/set_level.lua is valid"
     
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -52,6 +57,7 @@ deploy:production:
     - cp docker-compose.yml ansible/
     - cp fluent-bit.conf ansible/
     - cp loki-config.yml ansible/
+    - cp lua/set_level.lua ansible/
 
     - cd ansible
     - echo "=== DEPLOYING TO PRODUCTION ==="
@@ -66,6 +72,7 @@ deploy:production:
         - docker-compose.yml
         - fluent-bit.conf
         - loki-config.yml
+        - lua/**/*
         - ansible/**/*
         - .gitlab-ci.yml
 
