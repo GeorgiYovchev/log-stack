@@ -54,8 +54,8 @@ services:
       - GF_AUTH_GITLAB_ALLOW_SIGN_UP=true
       - GF_AUTH_GITLAB_ALLOW_ASSIGN_GRAFANA_ADMIN=true
       - GF_AUTH_GITLAB_ALLOWED_DOMAINS=oddstech.net
-      - GF_AUTH_GITLAB_CLIENT_ID=[CLIENT ID]
-      - GF_AUTH_GITLAB_CLIENT_SECRET=[CLIENT SECRET]
+      - GF_AUTH_GITLAB_CLIENT_ID=3be1f5fae4ff8bbb0c59de16499abe07f243fff156839b885d6e52ac651e08ad
+      - GF_AUTH_GITLAB_CLIENT_SECRET=gloas-c620edb642d285b9793a74fe3a09996a8194b01fbce5e8dbf311bf92c158c19e
       - GF_AUTH_GITLAB_AUTH_URL=https://gitlab.oddstech.net/oauth/authorize
       - GF_AUTH_GITLAB_TOKEN_URL=https://gitlab.oddstech.net/oauth/token
       - GF_AUTH_GITLAB_API_URL=https://gitlab.oddstech.net/api/v4/user
@@ -83,13 +83,20 @@ services:
       "
       echo 'Waiting for Kafka to be ready...'
       sleep 20
-      kafka-topics.sh --create --if-not-exists \
-        --bootstrap-server kafka:9092 \
-        --topic logs \
-        --partitions 3 \
-        --replication-factor 1 && \
-      echo 'Topic logs created successfully' || \
-      echo 'Failed to create topic - may already exist'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs --partitions 3 --replication-factor 1 && echo 'Topic logs created' || echo 'Topic logs exists'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs-staging --partitions 3 --replication-factor 1 && echo 'Topic logs-staging created' || echo 'Topic logs-staging exists'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs-prod-fr --partitions 3 --replication-factor 1 && echo 'Topic logs-prod-fr created' || echo 'Topic logs-prod-fr exists'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs-sport --partitions 3 --replication-factor 1 && echo 'Topic logs-sport created' || echo 'Topic logs-sport exists'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs-sport-stage --partitions 3 --replication-factor 1 && echo 'Topic logs-sport-stage created' || echo 'Topic logs-sport-stage exists'
+      
+      kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic logs-sport-iframes --partitions 3 --replication-factor 1 && echo 'Topic logs-sport-iframes created' || echo 'Topic logs-sport-iframes exists'
+      
+      echo '=== All topics created/verified successfully ==='
       "
     restart: "no"
 

@@ -99,12 +99,31 @@
       register: fluentbit_compose_changed
       changed_when: false
 
+    - name: Check if kafka-init config changed in docker-compose
+      shell: |
+        if [ ! -f {{ log_stack_path }}/docker-compose.yml.backup ]; then
+          echo "true"
+        else
+          diff <(grep -A 15 "kafka-init:" {{ log_stack_path }}/docker-compose.yml.backup | head -20) \
+               <(grep -A 15 "kafka-init:" {{ log_stack_path }}/docker-compose.yml.new | head -20) > /dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "true"
+          else
+            echo "false"
+          fi
+        fi
+      args:
+        executable: /bin/bash
+      register: kafka_init_changed
+      changed_when: false
+
     - name: Move new docker-compose.yml to final location
       command: mv {{ log_stack_path }}/docker-compose.yml.new {{ log_stack_path }}/docker-compose.yml
       when: kafka_config_changed.stdout == "true" or 
             loki_compose_changed.stdout == "true" or 
             grafana_compose_changed.stdout == "true" or
-            fluentbit_compose_changed.stdout == "true"
+            fluentbit_compose_changed.stdout == "true" or
+            kafka_init_changed.stdout == "true"
 
     - name: Copy fluent-bit.conf
       copy:
@@ -134,6 +153,7 @@
           - "Loki restart: {{ 'YES' if (loki_compose_changed.stdout == 'true' or loki_config_result.changed) else 'NO' }}"
           - "Grafana restart: {{ 'YES' if grafana_compose_changed.stdout == 'true' else 'NO' }}"
           - "Fluent Bit restart: {{ 'YES' if (fluentbit_compose_changed.stdout == 'true' or fluent_bit_result.changed or lua_script_result.changed) else 'NO' }}"
+          - "Kafka-init recreate: {{ 'YES' if kafka_init_changed.stdout == 'true' else 'NO' }}"
 
     - name: Restart Kafka (only if Kafka config changed)
       block:
@@ -200,8 +220,25 @@
             project_src: "{{ log_stack_path }}"
             services:
               - fluent-bit
-            state: started
+            state: present
       when: fluentbit_compose_changed.stdout == "true" or fluent_bit_result.changed or lua_script_result.changed
+
+    - name: Recreate kafka-init (if kafka-init config changed)
+      block:
+        - name: Remove old kafka-init container
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - kafka-init
+            state: absent
+        
+        - name: Start kafka-init to create topics
+          community.docker.docker_compose_v2:
+            project_src: "{{ log_stack_path }}"
+            services:
+              - kafka-init
+            state: present
+      when: kafka_init_changed.stdout == "true"
 
     - name: Verify all services are running
       command: docker compose -f {{ log_stack_path }}/docker-compose.yml ps

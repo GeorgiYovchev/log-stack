@@ -7,7 +7,7 @@ This document describes how to deploy a full log processing pipeline using:
 - **Kafka** – message broker used as the ingestion buffer  
 - **Fluent Bit** – consumer of Kafka messages and forwarder to Loki  
 - **Loki** – log storage backend  
-- **Grafana** – visualization UI  
+- **Grafana** – visualization UI (with GitLab OAuth)
 
 Promtail is **not used** in this setup. Instead, **Fluent Bit consumes directly from Kafka** and pushes logs to Loki.
 
@@ -16,15 +16,72 @@ Promtail is **not used** in this setup. Instead, **Fluent Bit consumes directly 
 ## 2. Architecture
 ```
 Kubernetes → Fluent Bit → Kafka (buffer 3 days) → Fluent Bit → Loki (storage 7 days) → Grafana
-                                                       ↓
-                                                  Lua Processing
+                                  ↓                     ↓
+                            Multi-Topic          Lua Processing
+                            (per environment)    + Environment Labels
 ```
 
 **Storage Efficiency**: ~12:1 compression ratio (Kafka 1.6GB → Loki 210MB)
 
 ---
 
-## 3. Initial Deployment
+## 3. Multi-Environment Setup
+
+### Kafka Topics
+
+Six separate topics for environment isolation:
+
+- `logs` – Production (main cluster)
+- `logs-staging` – Staging environment
+- `logs-prod-fr` – Production Frankfurt cluster
+- `logs-sport` – Sport production cluster
+- `logs-sport-stage` – Sport staging cluster
+- `logs-sport-iframes` – Sport iframes cluster
+
+### Producer Configuration (Kubernetes)
+
+Each cluster sends to its dedicated topic:
+```yaml
+# Production
+[OUTPUT]
+    Name            kafka
+    Match           kube.*
+    Brokers         217.154.234.140:19092
+    Topics          logs
+    Format          json
+    Retry_Limit     no_limits
+
+# Sport Staging
+[OUTPUT]
+    Name            kafka
+    Match           kube.*
+    Brokers         217.154.234.140:19092
+    Topics          logs-sport-stage
+    Format          json
+    Retry_Limit     no_limits
+```
+
+### Consumer Configuration (Log Server)
+
+Fluent Bit consumes from all topics with environment labels:
+```ini
+[INPUT]
+    Name        kafka
+    Topics      logs-sport-stage
+    Brokers     kafka:9092
+    Group_Id    fluentbit-consumer-sport-stage
+    Format      json
+    Tag         kafka.logs-sport-stage
+
+[FILTER]
+    Name         modify
+    Match        kafka.logs-sport-stage
+    Add          environment sport-stage
+```
+
+---
+
+## 4. Initial Deployment
 
 ### Directory Structure
 ```bash
@@ -42,11 +99,11 @@ sudo chown -R 472:472 /opt/log-stack/data/grafana
 All configuration files are in this repository:
 
 - [`docker-compose.yml`](./docker-compose.yml) - Main stack definition with Kafka, Loki, Grafana, Fluent Bit
-- [`fluent-bit.conf`](./fluent-bit.conf) - Fluent Bit configuration (Kafka input → Loki output)
+- [`fluent-bit.conf`](./fluent-bit.conf) - Multi-topic Kafka input with environment labels
 - [`loki-config.yml`](./loki-config.yml) - Loki storage and retention settings
 - [`lua/set_level.lua`](./lua/set_level.lua) - Lua script for log level detection and field cleanup
 
-**Important**: Edit `docker-compose.yml` and replace `YOUR_PUBLIC_IP` with your actual server IP.
+**Important**: Edit `docker-compose.yml` and replace `217.154.234.140` with your actual server IP.
 
 ### Lua Script Processing
 
@@ -85,6 +142,20 @@ The `set_level.lua` script processes logs before storage:
 }
 ```
 
+### Grafana OAuth (GitLab)
+
+Grafana configured with GitLab authentication:
+```yaml
+environment:
+  - GF_AUTH_GITLAB_ENABLED=true
+  - GF_AUTH_GITLAB_ALLOW_SIGN_UP=true
+  - GF_AUTH_GITLAB_ALLOWED_DOMAINS=oddstech.net
+  - GF_AUTH_GITLAB_ROLE_ATTRIBUTE_PATH=contains(groups[*], 'devops') && 'Admin' || 'Editor'
+  - GF_SERVER_ROOT_URL=https://loki.oddstech.net
+```
+
+**Access**: https://loki.oddstech.net (GitLab OAuth)
+
 ### Deploy
 ```bash
 cd /opt/log-stack
@@ -94,36 +165,40 @@ docker compose ps
 
 ---
 
-## 4. Verification
-```bash
-# Check services
-docker compose ps
+## 5. Verification
 
-# Check Kafka topics
+### Check All Topics
+```bash
+# List topics
 docker exec kafka kafka-topics.sh --list --bootstrap-server localhost:9092
 
-# Test produce/consume
-echo '{"message": "test", "level": "info"}' | \
-docker exec -i kafka kafka-console-producer.sh \
+# Check all consumer groups
+docker exec kafka kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 \
-  --topic logs
+  --list
 
-# Verify logs in Grafana: http://YOUR_IP:3000
-# Login: admin/admin
-# Query: {job="kafka_consumer"}
+# Check lag for specific environment
+docker exec kafka kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group fluentbit-consumer-sport-stage
 ```
 
----
+### Grafana Queries
+```logql
+# All environments
+{job="kafka_consumer"}
 
-## 5. Kubernetes Integration
+# Specific environment
+{job="kafka_consumer", environment="sport-stage"}
 
-Add Kafka output to your Kubernetes Fluent Bit (ArgoCD/Helm values):
-```yaml
-[OUTPUT]
-    Name        kafka
-    Match       kube.*
-    Brokers     YOUR_PUBLIC_IP:19092
-    Topics      logs
+# All sport environments
+{job="kafka_consumer", environment=~"sport.*"}
+
+# Errors across all environments
+{job="kafka_consumer", level="error"}
+
+# Count by environment (last 5 min)
+sum by (environment) (rate({job="kafka_consumer"}[5m]))
 ```
 
 ---
@@ -140,15 +215,16 @@ Add Kafka output to your Kubernetes Fluent Bit (ArgoCD/Helm values):
 ### Repository Structure
 ```
 log-stack/
-├── docker-compose.yml
-├── fluent-bit.conf
+├── docker-compose.yml        # Multi-topic Kafka + services
+├── fluent-bit.conf           # 6 Kafka inputs with environment labels
 ├── loki-config.yml
 ├── lua/
-│   └── set_level.lua         # Lua processing script
+│   └── set_level.lua
 ├── ansible/
-│   ├── playbook.yml          # Smart restart logic
-│   └── inventory.yml         # Server details
-└── .gitlab-ci.yml            # Pipeline definition
+│   ├── playbook.yml          # Smart restart (down → up)
+│   └── inventory.yml
+├── .gitlab-ci.yml
+└── .gitattributes            # Line ending normalization
 ```
 
 ### Setup
@@ -173,17 +249,17 @@ log-stack/
 ### Workflow
 ```bash
 # 1. Create feature branch
-git checkout -b feature/update-lua-script
+git checkout -b feature/add-new-environment
 
-# 2. Edit config (e.g., lua/set_level.lua)
-# Modify log level detection logic
+# 2. Edit config (e.g., fluent-bit.conf)
+# Add new environment topic
 
 # 3. Push and create MR
-git add lua/set_level.lua
-git commit -m "feat: Improve error detection in Lua script"
-git push origin feature/update-lua-script
+git add fluent-bit.conf
+git commit -m "feat: Add logs-new-env topic"
+git push origin feature/add-new-environment
 
-# 4. Create MR → Pipeline validates Lua syntax
+# 4. Create MR → Pipeline validates YAML syntax
 # 5. Merge to main → Ansible deploys → Only Fluent Bit restarts
 ```
 
@@ -196,8 +272,12 @@ git push origin feature/update-lua-script
 | Fluent Bit config in fluent-bit.conf | ✅ Fluent Bit only | ❌ No |
 | Lua script in lua/set_level.lua | ✅ Fluent Bit only | ❌ No |
 | Grafana config in docker-compose.yml | ✅ Grafana only | ❌ No |
+| Kafka-init topics | ✅ Kafka-init recreate | ❌ No |
 
-**Why No Data Loss?** Volumes persist in `/opt/log-stack/data/` - only containers restart.
+**Why No Data Loss?** 
+- Volumes persist in `/opt/log-stack/data/`
+- Smart restart uses `down → up` instead of `restart`
+- Kafka retains messages during Fluent Bit restart
 
 ---
 
@@ -209,10 +289,12 @@ du -sh /opt/log-stack/data/{kafka,loki,grafana}
 # Loki metrics
 curl http://localhost:3100/metrics | grep loki_distributor_lines_received_total
 
-# Kafka consumer lag
-docker exec kafka kafka-consumer-groups.sh \
-  --bootstrap-server localhost:9092 \
-  --describe --group fluentbit-consumer
+# Check all consumer lag
+for group in fluentbit-consumer fluentbit-consumer-staging fluentbit-consumer-prod-fr fluentbit-consumer-sport fluentbit-consumer-sport-stage fluentbit-consumer-sport-iframes; do
+  docker exec kafka kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 \
+    --describe --group $group
+done
 ```
 
 ---
@@ -223,6 +305,11 @@ docker exec kafka kafka-consumer-groups.sh \
 ```bash
 docker logs kafka --tail=50
 docker exec kafka kafka-topics.sh --list --bootstrap-server localhost:9092
+
+# Check consumer groups
+docker exec kafka kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --list
 ```
 
 ### Fluent Bit
@@ -231,6 +318,9 @@ docker logs fluent-bit --tail=50
 
 # Check Lua script execution
 docker logs fluent-bit | grep -i lua
+
+# Check environment label processing
+docker logs fluent-bit | grep -i environment
 ```
 
 ### Loki
@@ -249,16 +339,23 @@ telnet YOUR_PUBLIC_IP 19092
 
 ## 9. Summary
 
-**Pipeline**: Kubernetes → Kafka → Fluent Bit (+ Lua processing) → Loki → Grafana
+**Pipeline**: Kubernetes → Kafka (multi-topic) → Fluent Bit (+ Lua + environment labels) → Loki → Grafana
 
 **Key Features**:
+- **Multi-Environment**: 6 separate Kafka topics for environment isolation
+- **Environment Labels**: Automatic labeling by environment in Loki
 - **Kafka**: 3 days retention, port 19092 for external producers
 - **Loki**: 7 days retention, 12x compression ratio
 - **Lua Processing**: Automatic log level detection and field cleanup
+- **Grafana**: GitLab OAuth authentication
 - **Persistent Storage**: `/opt/log-stack/data/`
-- **CI/CD**: GitLab + Ansible with smart restart logic
+- **CI/CD**: GitLab + Ansible with smart restart logic (down → up)
 - **Zero Downtime**: Only changed services restart
 
+**Active Topics**:
+- `logs` (prod), `logs-staging`, `logs-prod-fr`
+- `logs-sport`, `logs-sport-stage`, `logs-sport-iframes`
+
 **Access**:
-- Grafana UI: http://YOUR_IP:3000 (default credentials: admin/admin)
+- Grafana UI: https://loki.oddstech.net (GitLab OAuth)
 - All configuration tracked in Git for easy rollbacks
